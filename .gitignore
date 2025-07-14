@@ -1,0 +1,26 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IPFS Swarm CLI
+.ipfs-swarm/
+.ipfs/
+
+# Misc
+*.swp
+*.swo
+
+# VS Code
+.vscode/
+
+# Temporary files
+/tmp/
