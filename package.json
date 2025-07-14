@@ -2,7 +2,7 @@
   "name": "ipfs-swarm-cli",
   "version": "1.0.0",
   "bin": {
-    "ipfs-swarm-cli": "index.js"
+    "ipfs-swarm-cli": "./index.js"
   },
   "dependencies": {
     "commander": "^9.0.0",
