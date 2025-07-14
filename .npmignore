@@ -1,0 +1,23 @@
+# Ignore local config and data
+.ipfs-swarm/
+.ipfs/
+
+# Ignore node modules (should not be published)
+node_modules/
+
+# Ignore logs and temp files
+*.log
+logs/
+/tmp/
+
+# Ignore OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Ignore test and dev files
+*.test.js
+*.spec.js
+
+# Ignore compressed archives
+*.tar.gz
