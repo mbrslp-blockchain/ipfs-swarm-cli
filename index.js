@@ -335,9 +335,20 @@ const configureIpfs = async (cfg) => {
   await execLive('ipfs', ['config', '--json', 'AutoTLS', '{"Enabled":false}']);
   await execLive('ipfs', ['config', '--json', 'Swarm.ConnMgr', '{"LowWater":10,"HighWater":100}']);
   
-  // Set addresses
+  // Set swarm addresses - listen on all interfaces
   const swarmAddresses = `["/ip4/0.0.0.0/tcp/${cfg.basePort}","/ip6/::/tcp/${cfg.basePort}"]`;
   await execLive('ipfs', ['config', '--json', 'Addresses.Swarm', swarmAddresses]);
+
+  // Configure announce addresses for Tailscale
+  if (cfg.networkType === 'tailscale' && cfg.tailscaleIP) {
+    const announceAddresses = `["/ip4/${cfg.tailscaleIP}/tcp/${cfg.basePort}"]`;
+    await execLive('ipfs', ['config', '--json', 'Addresses.Announce', announceAddresses]);
+
+    // Also set NoAnnounce to prevent announcing localhost addresses
+    const noAnnounceAddresses = `["/ip4/127.0.0.1/tcp/${cfg.basePort}","/ip6/::1/tcp/${cfg.basePort}"]`;
+    await execLive('ipfs', ['config', '--json', 'Addresses.NoAnnounce', noAnnounceAddresses]);
+  }
+
   await execLive('ipfs', ['config', 'Addresses.API', `/ip4/127.0.0.1/tcp/${cfg.basePort + 1000}`]);
   await execLive('ipfs', ['config', 'Addresses.Gateway', `/ip4/127.0.0.1/tcp/${cfg.basePort + 4080}`]);
 
@@ -416,6 +427,91 @@ const getExternalIP = async () => {
 
 /* ---------- commands ---------- */
 program
+program
+  .command('debug')
+  .description('Debug connection issues')
+  .action(async () => {
+    const cfg = loadCfg();
+    
+    if (!(await isDaemonRunning())) {
+      console.log(chalk.red('❌ IPFS daemon is not running'));
+      return;
+    }
+
+    console.log(chalk.cyan('🔍 Connection Debug Information:'));
+    
+    // Show IPFS configuration
+    const configResult = execSilent('ipfs', ['config', 'show']);
+    if (configResult.success) {
+      const config = JSON.parse(configResult.stdout);
+      console.log(chalk.yellow('\n📋 IPFS Addresses Configuration:'));
+      console.log(chalk.white(`  Swarm: ${JSON.stringify(config.Addresses.Swarm)}`));
+      console.log(chalk.white(`  Announce: ${JSON.stringify(config.Addresses.Announce || 'Not set')}`));
+      console.log(chalk.white(`  NoAnnounce: ${JSON.stringify(config.Addresses.NoAnnounce || 'Not set')}`));
+    }
+    
+    // Show bootstrap peers
+    const bootstrapResult = execSilent('ipfs', ['bootstrap', 'list']);
+    if (bootstrapResult.success) {
+      console.log(chalk.yellow('\n🔗 Bootstrap Peers:'));
+      console.log(chalk.white(bootstrapResult.stdout));
+    }
+    
+    // Show swarm addresses
+    const swarmAddrsResult = execSilent('ipfs', ['swarm', 'addrs', 'local']);
+    if (swarmAddrsResult.success) {
+      console.log(chalk.yellow('\n📍 Local Swarm Addresses:'));
+      console.log(chalk.white(swarmAddrsResult.stdout));
+    }
+    
+    // Try to connect manually if this is a regular node
+    if (cfg.nodeType === 'regular' && cfg.bootstrapMultiaddr) {
+      console.log(chalk.yellow('\n🔄 Attempting manual connection to bootstrap...'));
+      const connectResult = execSilent('ipfs', ['swarm', 'connect', cfg.bootstrapMultiaddr]);
+      if (connectResult.success) {
+        console.log(chalk.green('✅ Manual connection successful'));
+      } else {
+        console.log(chalk.red('❌ Manual connection failed:'));
+        console.log(chalk.red(connectResult.stderr));
+      }
+    }
+    
+    // Show current peers
+    const peersResult = execSilent('ipfs', ['swarm', 'peers']);
+    if (peersResult.success) {
+      const peers = peersResult.stdout.trim().split('\n').filter(Boolean);
+      console.log(chalk.yellow(`\n👥 Current Peers (${peers.length}):`));
+      peers.forEach((peer, i) => {
+        console.log(chalk.white(`  ${i + 1}. ${peer}`));
+      });
+    }
+  });
+
+program
+  .command('connect')
+  .description('Manually connect to a peer')
+  .argument('<multiaddr>', 'Peer multiaddr to connect to')
+  .action(async (multiaddr) => {
+    if (!(await isDaemonRunning())) {
+      console.log(chalk.red('❌ IPFS daemon is not running'));
+      return;
+    }
+
+    const spin = spinner(`Connecting to ${multiaddr}`);
+    try {
+      await execLive('ipfs', ['swarm', 'connect', multiaddr]);
+      spin.succeed('Connected successfully');
+      
+      // Show updated peer list
+      const peersResult = execSilent('ipfs', ['swarm', 'peers']);
+      if (peersResult.success) {
+        const peers = peersResult.stdout.trim().split('\n').filter(Boolean);
+        console.log(chalk.green(`\n✅ Now connected to ${peers.length} peer(s)`));
+      }
+    } catch (e) {
+      spin.fail(`Connection failed: ${e.message}`);
+    }
+  });
   .command('init')
   .description('Initialize IPFS swarm node')
   .option('--bootstrap', 'Set up as bootstrap node')
