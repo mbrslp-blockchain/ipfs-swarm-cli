@@ -293,6 +293,19 @@ const getExternalIP = async () => {
   }
 };
 
+/* ---------- tailscale helpers ---------- */
+const isTailscaleRunning = () => {
+  try { execSync('tailscale ip -4', { stdio: 'ignore' }); return true; } catch { return false; }
+};
+const installTailscale = async () => {
+  const spin = spinner('Installing / starting Tailscale');
+  try {
+    await execLive('curl -fsSL https://tailscale.com/install.sh | sh');
+    await execLive('sudo tailscale up');
+    spin.succeed('Tailscale ready');
+  } catch (e) { spin.fail(e.message); throw e; }
+};
+
 /* ---------- commands ---------- */
 program
   .command('init')
@@ -327,6 +340,13 @@ program
         },
         {
           type: 'input',
+          name: 'tailscaleAddr',
+          message: 'Tailscale / reachable address for bootstrap (leave empty to skip):',
+          when: (a) => a.nodeType === 'regular',
+          validate: (addr) => !addr || addr.startsWith('/ip4/') || addr.startsWith('/ip6/') || 'Must be a valid multiaddr'
+        },
+        {
+          type: 'input',
           name: 'basePort',
           message: 'Base port number:',
           default: cfg.basePort,
@@ -353,6 +373,7 @@ program
       answers.basePort = parseInt(options.port);
       answers.swarmKeyPath = options.swarmKey;
       answers.bootstrapMultiaddr = options.bootstrapAddr;
+      answers.tailscaleAddr = null; // CLI flag not exposed yet
     }
 
     // Update configuration
@@ -439,6 +460,14 @@ program
   .description('Start IPFS daemon')
   .action(async () => {
     const cfg = loadCfg();
+
+    // Quick Tailscale check for regular nodes
+    if (cfg.nodeType === 'regular' && !isTailscaleRunning()) {
+      const { useTailscale } = await inquirer.prompt([
+        { type: 'confirm', name: 'useTailscale', message: 'Tailscale not detected. Install & start it?', default: true }
+      ]);
+      if (useTailscale) await installTailscale();
+    }
     
     if (await isDaemonRunning()) {
       console.log(chalk.yellow('IPFS daemon is already running'));
