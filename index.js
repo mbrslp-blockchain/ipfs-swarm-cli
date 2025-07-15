@@ -5,6 +5,7 @@
     Private IPFS Swarm Manager
     - Bootstrap node: First node that generates swarm key
     - Regular nodes: Connect to bootstrap using shared swarm key
+    - Tailscale integration for secure networking
 */
 const { Command } = require('commander');
 const fs = require('fs');
@@ -28,11 +29,13 @@ const loadCfg = () => {
   if (!exists(CONFIG)) {
     saveCfg({
       nodeType: 'bootstrap', // 'bootstrap' or 'regular'
+      networkType: 'normal', // 'normal' or 'tailscale'
       swarmKey: null,
       basePort: 4001,
       bootstrapMultiaddr: null,
       nodeId: null,
       lastStarted: null,
+      tailscaleIP: null,
     });
   }
   return JSON.parse(fs.readFileSync(CONFIG));
@@ -89,30 +92,158 @@ const execSilent = (cmd, args = []) => {
   }
 };
 
-/* ---------- installers ---------- */
-const installTools = async () => {
-  const requiredTools = ['wget', 'curl', 'net-tools', 'openssl'];
-  const missing = requiredTools.filter((tool) => !checkTool(tool));
+/* ---------- tailscale helpers ---------- */
+const isTailscaleInstalled = () => checkTool('tailscale');
 
-  if (missing.length === 0) {
-    console.log(chalk.green('All required tools are already installed'));
-    return;
+const isTailscaleRunning = () => {
+  try {
+    const result = execSilent('tailscale', ['status']);
+    return result.success && !result.stdout.includes('Stopped');
+  } catch {
+    return false;
   }
+};
 
-  console.log(chalk.yellow(`Missing tools: ${missing.join(', ')}`));
-  const spin = spinner('Installing missing tools');
+const getTailscaleIP = () => {
+  try {
+    const result = execSilent('tailscale', ['ip', '-4']);
+    return result.success ? result.stdout.trim() : null;
+  } catch {
+    return null;
+  }
+};
+
+const getTailscaleStatus = () => {
+  try {
+    const result = execSilent('tailscale', ['status', '--json']);
+    if (result.success) {
+      const status = JSON.parse(result.stdout);
+      return {
+        running: status.BackendState === 'Running',
+        loggedIn: status.BackendState !== 'NeedsLogin',
+        ip: status.TailscaleIPs?.[0] || null,
+        hostname: status.Self?.HostName || null,
+      };
+    }
+  } catch {}
+  return { running: false, loggedIn: false, ip: null, hostname: null };
+};
+
+const installTailscale = async () => {
+  const spin = spinner('Installing Tailscale');
   try {
     if (platform === 'linux') {
-      await execLive('sudo', ['apt-get', 'install', '--no-upgrade', '-y', ...missing]);
+      await execLive('curl', ['-fsSL', 'https://tailscale.com/install.sh'], { 
+        stdio: ['ignore', 'pipe', 'inherit'] 
+      });
+      await execLive('sh', ['-c', 'curl -fsSL https://tailscale.com/install.sh | sh']);
     } else if (platform === 'darwin') {
-      for (const tool of missing) {
-        await execLive('brew', ['install', tool]);
-      }
+      await execLive('brew', ['install', 'tailscale']);
+    } else {
+      throw new Error('Unsupported platform for automatic Tailscale installation');
     }
-    spin.succeed();
+    spin.succeed('Tailscale installed');
   } catch (e) {
     spin.fail(e.message);
     throw e;
+  }
+};
+
+const setupTailscale = async () => {
+  const status = getTailscaleStatus();
+  
+  if (!status.running) {
+    console.log(chalk.yellow('Starting Tailscale...'));
+    const spin = spinner('Starting Tailscale daemon');
+    try {
+      await execLive('sudo', ['tailscale', 'up']);
+      spin.succeed();
+    } catch (e) {
+      spin.fail();
+      console.log(chalk.red('Failed to start Tailscale automatically.'));
+      console.log(chalk.yellow('Please run manually: sudo tailscale up'));
+      console.log(chalk.cyan('Then visit: https://login.tailscale.com/ to authenticate'));
+      
+      const { continueSetup } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'continueSetup',
+          message: 'Have you completed Tailscale authentication?',
+          default: false,
+        },
+      ]);
+      
+      if (!continueSetup) {
+        throw new Error('Tailscale setup incomplete');
+      }
+    }
+  }
+  
+  // Verify connection
+  const finalStatus = getTailscaleStatus();
+  if (!finalStatus.running || !finalStatus.ip) {
+    throw new Error('Tailscale is not properly configured');
+  }
+  
+  console.log(chalk.green(`✅ Tailscale ready: ${finalStatus.ip} (${finalStatus.hostname})`));
+  return finalStatus.ip;
+};
+
+const testTailscaleConnection = async (targetIP) => {
+  if (!targetIP) return false;
+  
+  console.log(chalk.yellow(`Testing connection to ${targetIP}...`));
+  const result = execSilent('ping', ['-c', '3', '-W', '3', targetIP]);
+  
+  if (result.success) {
+    console.log(chalk.green(`✅ Connection to ${targetIP} successful`));
+    return true;
+  } else {
+    console.log(chalk.red(`❌ Cannot reach ${targetIP}`));
+    return false;
+  }
+};
+
+/* ---------- installers ---------- */
+const installTools = async (includeTailscale = false) => {
+  let requiredTools = ['wget', 'curl', 'net-tools', 'openssl'];
+  
+  if (includeTailscale && !isTailscaleInstalled()) {
+    console.log(chalk.yellow('Tailscale not found, will install it...'));
+  }
+  
+  const missing = requiredTools.filter((tool) => !checkTool(tool));
+
+  if (missing.length === 0 && (!includeTailscale || isTailscaleInstalled())) {
+    console.log(chalk.green('All required tools are already installed'));
+    if (includeTailscale && isTailscaleInstalled()) {
+      console.log(chalk.green('Tailscale is already installed'));
+    }
+    return;
+  }
+
+  if (missing.length > 0) {
+    console.log(chalk.yellow(`Missing tools: ${missing.join(', ')}`));
+    const spin = spinner('Installing missing tools');
+    try {
+      if (platform === 'linux') {
+        await execLive('sudo', ['apt-get', 'update']);
+        await execLive('sudo', ['apt-get', 'install', '--no-upgrade', '-y', ...missing]);
+      } else if (platform === 'darwin') {
+        for (const tool of missing) {
+          await execLive('brew', ['install', tool]);
+        }
+      }
+      spin.succeed();
+    } catch (e) {
+      spin.fail(e.message);
+      throw e;
+    }
+  }
+  
+  // Install Tailscale if needed
+  if (includeTailscale && !isTailscaleInstalled()) {
+    await installTailscale();
   }
 };
 
@@ -198,21 +329,19 @@ const configureIpfs = async (cfg) => {
     installSwarmKey(cfg.swarmKey);
   }
 
-  // Configure IPFS settings - Fixed JSON configuration
+  // Configure IPFS settings
   await execLive('ipfs', ['config', '--bool', 'Discovery.MDNS.Enabled', 'false']);
   await execLive('ipfs', ['config', 'Routing.Type', 'dht']);
-  
-  // Fix: Use proper JSON quoting
   await execLive('ipfs', ['config', '--json', 'AutoTLS', '{"Enabled":false}']);
   await execLive('ipfs', ['config', '--json', 'Swarm.ConnMgr', '{"LowWater":10,"HighWater":100}']);
   
-  // Set addresses - Fix: Use proper JSON array format
+  // Set addresses
   const swarmAddresses = `["/ip4/0.0.0.0/tcp/${cfg.basePort}","/ip6/::/tcp/${cfg.basePort}"]`;
   await execLive('ipfs', ['config', '--json', 'Addresses.Swarm', swarmAddresses]);
   await execLive('ipfs', ['config', 'Addresses.API', `/ip4/127.0.0.1/tcp/${cfg.basePort + 1000}`]);
   await execLive('ipfs', ['config', 'Addresses.Gateway', `/ip4/127.0.0.1/tcp/${cfg.basePort + 4080}`]);
 
-  // Clear default bootstrap nodes (important for private swarm)
+  // Clear default bootstrap nodes
   await execLive('ipfs', ['bootstrap', 'rm', '--all']);
 
   // Add custom bootstrap if this is not a bootstrap node
@@ -230,7 +359,6 @@ const isDaemonRunning = async () => {
 };
 
 const getPeerId = async () => {
-  // Method 1: Use JSON parsing (more reliable)
   const result = execSilent('ipfs', ['id']);
   if (result.success) {
     try {
@@ -240,10 +368,7 @@ const getPeerId = async () => {
       throw new Error('Failed to parse peer ID');
     }
   }
-
   
-  
-  // Method 2: Alternative template approach
   const templateResult = execSilent('ipfs', ['id', '-f', '<id>']);
   if (templateResult.success) {
     return templateResult.stdout.trim();
@@ -268,19 +393,15 @@ const waitForDaemon = async (maxWait = 15000) => {
 };
 
 const killDaemon = async () => {
-  // Try graceful shutdown first
   try {
     const result = execSilent('ipfs', ['shutdown']);
     if (result.success) return;
   } catch {}
   
-  // If graceful shutdown fails, try to kill the process
   try {
-    const result = execSilent('pkill', ['-f', 'ipfs daemon']);  // Added -f flag back
-    // Don't throw error if no process found
+    execSilent('pkill', ['-f', 'ipfs daemon']);
   } catch {}
   
-  // Give it a moment to clean up
   await new Promise(resolve => setTimeout(resolve, 1000));
 };
 
@@ -293,25 +414,14 @@ const getExternalIP = async () => {
   }
 };
 
-/* ---------- tailscale helpers ---------- */
-const isTailscaleRunning = () => {
-  try { execSync('tailscale ip -4', { stdio: 'ignore' }); return true; } catch { return false; }
-};
-const installTailscale = async () => {
-  const spin = spinner('Installing / starting Tailscale');
-  try {
-    await execLive('curl -fsSL https://tailscale.com/install.sh | sh');
-    await execLive('sudo tailscale up');
-    spin.succeed('Tailscale ready');
-  } catch (e) { spin.fail(e.message); throw e; }
-};
-
 /* ---------- commands ---------- */
 program
   .command('init')
   .description('Initialize IPFS swarm node')
   .option('--bootstrap', 'Set up as bootstrap node')
   .option('--regular', 'Set up as regular node')
+  .option('--tailscale', 'Use Tailscale networking')
+  .option('--normal', 'Use normal IP networking')
   .option('--swarm-key <path>', 'Path to existing swarm key file')
   .option('--bootstrap-addr <addr>', 'Bootstrap node multiaddr')
   .option('--port <port>', 'Base port number', '4001')
@@ -320,6 +430,7 @@ program
 ╔════════════════════════════════════════════╗
 ║     IPFS Swarm CLI – Private Swarm Manager ║
 ║     Kubo v0.35.0 – Private Network Setup   ║
+║     With Tailscale Integration             ║
 ╚════════════════════════════════════════════╝
 `));
 
@@ -339,11 +450,13 @@ program
           ]
         },
         {
-          type: 'input',
-          name: 'tailscaleAddr',
-          message: 'Tailscale / reachable address for bootstrap (leave empty to skip):',
-          when: (a) => a.nodeType === 'regular',
-          validate: (addr) => !addr || addr.startsWith('/ip4/') || addr.startsWith('/ip6/') || 'Must be a valid multiaddr'
+          type: 'list',
+          name: 'networkType',
+          message: 'How do you want to connect nodes?',
+          choices: [
+            { name: 'Normal IP (Public/LAN)', value: 'normal' },
+            { name: 'Tailscale (Secure mesh network)', value: 'tailscale' }
+          ]
         },
         {
           type: 'input',
@@ -351,29 +464,34 @@ program
           message: 'Base port number:',
           default: cfg.basePort,
           validate: (n) => !isNaN(n) && n > 1024 && n < 65535
-        },
-        {
-          type: 'input',
-          name: 'swarmKeyPath',
-          message: 'Path to swarm key file (leave empty for bootstrap):',
-          when: (a) => a.nodeType === 'regular',
-          validate: (path) => !path || exists(path) || 'File does not exist'
-        },
-        {
-          type: 'input',
-          name: 'bootstrapMultiaddr',
-          message: 'Bootstrap node multiaddr:',
-          when: (a) => a.nodeType === 'regular',
-          validate: (addr) => addr && addr.includes('/p2p/') || 'Invalid multiaddr format'
         }
       ]);
+
+      // Additional prompts for regular nodes
+      if (answers.nodeType === 'regular') {
+        const regularAnswers = await inquirer.prompt([
+          {
+            type: 'input',
+            name: 'swarmKeyPath',
+            message: 'Path to swarm key file:',
+            validate: (path) => path && exists(path) || 'File does not exist'
+          },
+          {
+            type: 'input',
+            name: 'bootstrapMultiaddr',
+            message: 'Bootstrap node multiaddr:',
+            validate: (addr) => addr && addr.includes('/p2p/') || 'Invalid multiaddr format'
+          }
+        ]);
+        Object.assign(answers, regularAnswers);
+      }
     } else {
       // Command line mode
       answers.nodeType = options.bootstrap ? 'bootstrap' : 'regular';
+      answers.networkType = options.tailscale ? 'tailscale' : 'normal';
       answers.basePort = parseInt(options.port);
       answers.swarmKeyPath = options.swarmKey;
       answers.bootstrapMultiaddr = options.bootstrapAddr;
-      answers.tailscaleAddr = null; // CLI flag not exposed yet
     }
 
     // Update configuration
@@ -392,19 +510,35 @@ program
     }
 
     const steps = [
-      { name: 'Installing required tools', fn: installTools },
+      { 
+        name: 'Installing required tools', 
+        fn: () => installTools(cfg.networkType === 'tailscale') 
+      },
       { name: 'Installing Kubo', fn: installKubo },
-      { name: 'Stopping existing daemon', 
+      { 
+        name: 'Stopping existing daemon', 
         fn: async () => {
           try {
             await killDaemon();
           } catch (e) {
             console.log(chalk.gray('No existing daemon to stop'));
+          }
         }
-       }
       },
       { name: 'Initializing IPFS', fn: initializeIpfs },
     ];
+
+    // Setup Tailscale if needed
+    if (cfg.networkType === 'tailscale') {
+      steps.push({
+        name: 'Setting up Tailscale',
+        fn: async () => {
+          const tailscaleIP = await setupTailscale();
+          cfg.tailscaleIP = tailscaleIP;
+          saveCfg(cfg);
+        }
+      });
+    }
 
     if (cfg.nodeType === 'bootstrap') {
       steps.push({
@@ -422,6 +556,19 @@ program
           saveCfg(cfg);
         }
       });
+      
+      // Test connection to bootstrap if using Tailscale
+      if (cfg.networkType === 'tailscale' && cfg.bootstrapMultiaddr) {
+        steps.push({
+          name: 'Testing connection to bootstrap',
+          fn: async () => {
+            const match = cfg.bootstrapMultiaddr.match(/\/ip4\/([^\/]+)\//);
+            if (match) {
+              await testTailscaleConnection(match[1]);
+            }
+          }
+        });
+      }
     }
 
     steps.push({
@@ -445,12 +592,20 @@ program
     
     if (cfg.nodeType === 'bootstrap') {
       console.log(chalk.yellow('\n📋 Bootstrap Node Setup Complete:'));
+      console.log(chalk.white(`  • Network Type: ${cfg.networkType}`));
       console.log(chalk.white(`  • Swarm key generated: ${cfg.swarmKey}`));
+      if (cfg.networkType === 'tailscale') {
+        console.log(chalk.white(`  • Tailscale IP: ${cfg.tailscaleIP}`));
+      }
       console.log(chalk.white(`  • Share this key with other nodes`));
       console.log(chalk.white(`  • Run 'ipfs-swarm-cli start' to begin`));
     } else {
       console.log(chalk.yellow('\n📋 Regular Node Setup Complete:'));
+      console.log(chalk.white(`  • Network Type: ${cfg.networkType}`));
       console.log(chalk.white(`  • Connected to bootstrap: ${cfg.bootstrapMultiaddr}`));
+      if (cfg.networkType === 'tailscale') {
+        console.log(chalk.white(`  • Tailscale IP: ${cfg.tailscaleIP}`));
+      }
       console.log(chalk.white(`  • Run 'ipfs-swarm-cli start' to join swarm`));
     }
   });
@@ -461,12 +616,16 @@ program
   .action(async () => {
     const cfg = loadCfg();
 
-    // Quick Tailscale check for regular nodes
-    if (cfg.nodeType === 'regular' && !isTailscaleRunning()) {
-      const { useTailscale } = await inquirer.prompt([
-        { type: 'confirm', name: 'useTailscale', message: 'Tailscale not detected. Install & start it?', default: true }
-      ]);
-      if (useTailscale) await installTailscale();
+    // Check Tailscale if needed
+    if (cfg.networkType === 'tailscale') {
+      const status = getTailscaleStatus();
+      if (!status.running) {
+        console.log(chalk.red('❌ Tailscale is not running'));
+        console.log(chalk.yellow('Please run: sudo tailscale up'));
+        console.log(chalk.cyan('Or visit: https://login.tailscale.com/ to authenticate'));
+        return;
+      }
+      console.log(chalk.green(`✅ Tailscale connected: ${status.ip} (${status.hostname})`));
     }
     
     if (await isDaemonRunning()) {
@@ -474,7 +633,7 @@ program
       return;
     }
 
-    console.log(chalk.blue(`Starting ${cfg.nodeType} node...`));
+    console.log(chalk.blue(`Starting ${cfg.nodeType} node (${cfg.networkType} network)...`));
     
     // Kill any existing daemon
     await killDaemon();
@@ -509,6 +668,7 @@ program
       console.log(chalk.cyan('\n📊 Node Information:'));
       console.log(chalk.white(`  Node ID: ${peerId}`));
       console.log(chalk.white(`  Type: ${cfg.nodeType}`));
+      console.log(chalk.white(`  Network: ${cfg.networkType}`));
       console.log(chalk.white(`  Port: ${cfg.basePort}`));
       
       if (cfg.nodeType === 'bootstrap') {
@@ -516,22 +676,93 @@ program
         console.log(chalk.yellow('\n🚀 Bootstrap Node Ready:'));
         console.log(chalk.white(`  Local: ${localMultiaddr}`));
         
-        const externalIP = await getExternalIP();
-        if (externalIP) {
-          const externalMultiaddr = `/ip4/${externalIP}/tcp/${cfg.basePort}/p2p/${peerId}`;
-          console.log(chalk.white(`  External: ${externalMultiaddr}`));
+        if (cfg.networkType === 'tailscale' && cfg.tailscaleIP) {
+          const tailscaleMultiaddr = `/ip4/${cfg.tailscaleIP}/tcp/${cfg.basePort}/p2p/${peerId}`;
+          console.log(chalk.white(`  Tailscale: ${tailscaleMultiaddr}`));
           console.log(chalk.green('\n📋 Share this information with other nodes:'));
           console.log(chalk.white(`  Swarm Key: ${cfg.swarmKey}`));
-          console.log(chalk.white(`  Bootstrap Address: ${externalMultiaddr}`));
+          console.log(chalk.white(`  Bootstrap Address: ${tailscaleMultiaddr}`));
+        } else {
+          const externalIP = await getExternalIP();
+          if (externalIP) {
+            const externalMultiaddr = `/ip4/${externalIP}/tcp/${cfg.basePort}/p2p/${peerId}`;
+            console.log(chalk.white(`  External: ${externalMultiaddr}`));
+            console.log(chalk.green('\n📋 Share this information with other nodes:'));
+            console.log(chalk.white(`  Swarm Key: ${cfg.swarmKey}`));
+            console.log(chalk.white(`  Bootstrap Address: ${externalMultiaddr}`));
+          }
         }
       } else {
         console.log(chalk.yellow('\n🔗 Regular Node Connected'));
         console.log(chalk.white(`  Bootstrap: ${cfg.bootstrapMultiaddr}`));
+        if (cfg.networkType === 'tailscale') {
+          console.log(chalk.white(`  Tailscale IP: ${cfg.tailscaleIP}`));
+        }
       }
     } catch (e) {
       console.error(chalk.yellow(`ℹ️  Node started successfully. Use 'info' command for connection details.`));
     }
   });
+
+program
+  .command('tailscale')
+  .description('Manage Tailscale connection')
+  .action(async () => {
+    if (!isTailscaleInstalled()) {
+      console.log(chalk.red('❌ Tailscale is not installed'));
+      const { install } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'install',
+          message: 'Would you like to install Tailscale?',
+          default: true,
+        },
+      ]);
+      
+      if (install) {
+        await installTailscale();
+      } else {
+        return;
+      }
+    }
+
+    const status = getTailscaleStatus();
+    
+    console.log(chalk.cyan('📡 Tailscale Status:'));
+    console.log(chalk.white(`  Installed: ${isTailscaleInstalled() ? '✅' : '❌'}`));
+    console.log(chalk.white(`  Running: ${status.running ? '✅' : '❌'}`));
+    console.log(chalk.white(`  Logged In: ${status.loggedIn ? '✅' : '❌'}`));
+    
+    if (status.ip) {
+      console.log(chalk.white(`  IP Address: ${status.ip}`));
+    }
+    
+    if (status.hostname) {
+      console.log(chalk.white(`  Hostname: ${status.hostname}`));
+    }
+
+    if (!status.running) {
+      console.log(chalk.yellow('\n🔧 To start Tailscale:'));
+      console.log(chalk.white('  sudo tailscale up'));
+      console.log(chalk.cyan('  Then visit: https://login.tailscale.com/'));
+      
+      const { startNow } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'startNow',
+          message: 'Would you like to start Tailscale now?',
+          default: true,
+        },
+      ]);
+      
+      if (startNow) {
+        await setupTailscale();
+      }
+    }
+  });
+
+// Add the rest of your existing commands (stop, status, info, test, clean) here...
+// They remain the same as in your original code
 
 program
   .command('stop')
@@ -559,6 +790,12 @@ program
 
     console.log(chalk.green('✅ IPFS daemon is running'));
     console.log(chalk.cyan(`Node type: ${cfg.nodeType}`));
+    console.log(chalk.cyan(`Network type: ${cfg.networkType}`));
+    
+    if (cfg.networkType === 'tailscale') {
+      const status = getTailscaleStatus();
+      console.log(chalk.cyan(`Tailscale: ${status.running ? '✅' : '❌'} ${status.ip || ''}`));
+    }
     
     // Get peer information
     const peersResult = execSilent('ipfs', ['swarm', 'peers']);
@@ -593,8 +830,15 @@ program
     
     console.log(chalk.cyan('📋 Node Configuration:'));
     console.log(chalk.white(`  Type: ${cfg.nodeType}`));
+    console.log(chalk.white(`  Network: ${cfg.networkType}`));
     console.log(chalk.white(`  Port: ${cfg.basePort}`));
     console.log(chalk.white(`  Swarm Key: ${cfg.swarmKey || 'Not set'}`));
+    
+    if (cfg.networkType === 'tailscale') {
+      const status = getTailscaleStatus();
+      console.log(chalk.white(`  Tailscale IP: ${status.ip || 'Not connected'}`));
+      console.log(chalk.white(`  Tailscale Status: ${status.running ? 'Running' : 'Stopped'}`));
+    }
     
     if (cfg.nodeType === 'bootstrap') {
       console.log(chalk.yellow('\n🚀 Bootstrap Node Info:'));
@@ -603,12 +847,17 @@ program
         const localMultiaddr = `/ip4/127.0.0.1/tcp/${cfg.basePort}/p2p/${cfg.nodeId}`;
         console.log(chalk.white(`  Local Multiaddr: ${localMultiaddr}`));
         
-        const externalIP = await getExternalIP();
-        if (externalIP) {
-          const externalMultiaddr = `/ip4/${externalIP}/tcp/${cfg.basePort}/p2p/${cfg.nodeId}`;
-          console.log(chalk.white(`  External Multiaddr: ${externalMultiaddr}`));
+        if (cfg.networkType === 'tailscale' && cfg.tailscaleIP) {
+          const tailscaleMultiaddr = `/ip4/${cfg.tailscaleIP}/tcp/${cfg.basePort}/p2p/${cfg.nodeId}`;
+          console.log(chalk.white(`  Tailscale Multiaddr: ${tailscaleMultiaddr}`));
         } else {
-          console.log(chalk.gray(`  External IP: Unable to detect`));
+          const externalIP = await getExternalIP();
+          if (externalIP) {
+            const externalMultiaddr = `/ip4/${externalIP}/tcp/${cfg.basePort}/p2p/${cfg.nodeId}`;
+            console.log(chalk.white(`  External Multiaddr: ${externalMultiaddr}`));
+          } else {
+            console.log(chalk.gray(`  External IP: Unable to detect`));
+          }
         }
       } else {
         console.log(chalk.gray(`  Node not started yet`));
