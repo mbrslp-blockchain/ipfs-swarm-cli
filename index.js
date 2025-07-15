@@ -426,8 +426,7 @@ const getExternalIP = async () => {
 };
 
 /* ---------- commands ---------- */
-program
-program
+// ...existing code...
   .command('debug')
   .description('Debug connection issues')
   .action(async () => {
@@ -512,6 +511,8 @@ program
       spin.fail(`Connection failed: ${e.message}`);
     }
   });
+
+program
   .command('init')
   .description('Initialize IPFS swarm node')
   .option('--bootstrap', 'Set up as bootstrap node')
