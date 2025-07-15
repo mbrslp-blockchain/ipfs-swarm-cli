@@ -352,8 +352,8 @@ const configureIpfs = async (cfg) => {
     await execLive('ipfs', ['config', '--json', 'Addresses.NoAnnounce', noAnnounceAddresses]);
   }
 
-  await execLive('ipfs', ['config', 'Addresses.API', `/ip4/127.0.0.1/tcp/${cfg.basePort + 1000}`]);
-  await execLive('ipfs', ['config', 'Addresses.Gateway', `/ip4/127.0.0.1/tcp/${cfg.basePort + 4080}`]);
+  await execLive('ipfs', ['config', 'Addresses.API', `/ip4/127.0.0.1/tcp/${parseInt(cfg.basePort) + 1000}`]);
+  await execLive('ipfs', ['config', 'Addresses.Gateway', `/ip4/127.0.0.1/tcp/${parseInt(cfg.basePort) + 4080}`]);
 
   // Clear default bootstrap nodes
   await execLive('ipfs', ['bootstrap', 'rm', '--all']);
