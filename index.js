@@ -332,6 +332,12 @@ const configureIpfs = async (cfg) => {
   await execLive('ipfs', ['config', '--json', 'AutoTLS', '{"Enabled":false}']);
   await execLive('ipfs', ['config', '--json', 'Swarm.ConnMgr', '{"LowWater":10,"HighWater":100}']);
   
+    // *** ADD THIS BLOCK TO REMOVE ADDRFILTERS ***
+  console.log(chalk.yellow('Clearing AddrFilters to allow all private network connections...'));
+  await execLive('ipfs', ['config', '--json', 'Swarm.AddrFilters', '[]']);
+  // *******************************************
+
+  
   // Set swarm addresses - listen on all interfaces
   const swarmAddresses = `["/ip4/0.0.0.0/tcp/${cfg.basePort}","/ip6/::/tcp/${cfg.basePort}"]`;
   await execLive('ipfs', ['config', '--json', 'Addresses.Swarm', swarmAddresses]);
