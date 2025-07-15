@@ -133,9 +133,6 @@ const installTailscale = async () => {
   const spin = spinner('Installing Tailscale');
   try {
     if (platform === 'linux') {
-      await execLive('curl', ['-fsSL', 'https://tailscale.com/install.sh'], { 
-        stdio: ['ignore', 'pipe', 'inherit'] 
-      });
       await execLive('sh', ['-c', 'curl -fsSL https://tailscale.com/install.sh | sh']);
     } else if (platform === 'darwin') {
       await execLive('brew', ['install', 'tailscale']);
@@ -426,7 +423,7 @@ const getExternalIP = async () => {
 };
 
 /* ---------- commands ---------- */
-// ...existing code...
+program
   .command('debug')
   .description('Debug connection issues')
   .action(async () => {
@@ -857,9 +854,6 @@ program
       }
     }
   });
-
-// Add the rest of your existing commands (stop, status, info, test, clean) here...
-// They remain the same as in your original code
 
 program
   .command('stop')
