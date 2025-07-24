@@ -1,5 +1,8 @@
 # IPFS Private Swarm CLI - Complete Setup Guide
-
+## NPM Package
+```bash
+npm install ipfs-swarm-cli
+```
 ## Table of Contents
 1. [Understanding IPFS Private Swarms](#understanding-ipfs-private-swarms)
 2. [Installation](#installation)
